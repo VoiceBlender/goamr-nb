@@ -1,0 +1,15 @@
+goamr-nb
+Copyright 2026 The goamr-nb authors
+
+This product is a pure-Go port of AMR-NB (3GPP TS 26.071, 26.073, 26.090,
+26.101, 26.104) derived from the following Apache-2.0 licensed C reference:
+
+  - opencore-amrnb (AMR-NB encoder and decoder)
+    https://sourceforge.net/projects/opencore-amr/
+    Copyright (C) 2009 Martin Storsjo
+    Copyright (C) The Android Open Source Project
+
+The fixed-point DSP was translated function-by-function from the above
+source, preserving its algorithms and bit-exact semantics. The original
+work is licensed under the Apache License, Version 2.0; this port is
+distributed under the same license (see LICENSE).
