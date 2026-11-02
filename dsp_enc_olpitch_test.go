@@ -19,7 +19,7 @@ func TestPitchOlFindsPeriod(t *testing.T) {
 			ph := float64((n % P)) / float64(P)
 			buf[n] = int16(9000*sinApprox(2*3.14159265*ph) + 2500*sinApprox(2*3.14159265*ph*2))
 		}
-		lag := int(pitchOl(dMR59, buf, off, pitMin, pitMax, Lframe))
+		lag := int(pitchOl(nil, dMR59, buf, off, pitMin, pitMax, Lframe, 0))
 
 		// the chosen lag should be a near-multiple of the true period
 		ok := false
@@ -49,8 +49,8 @@ func TestPitchOlDeterministic(t *testing.T) {
 	for n := range buf {
 		buf[n] = int16(6000 * sinApprox(float64(n)*0.13))
 	}
-	a := pitchOl(dMR122, buf, off, cPIT_MIN_MR122, pitMax, Lframe)
-	b := pitchOl(dMR122, buf, off, cPIT_MIN_MR122, pitMax, Lframe)
+	a := pitchOl(nil, dMR122, buf, off, cPIT_MIN_MR122, pitMax, Lframe, 0)
+	b := pitchOl(nil, dMR122, buf, off, cPIT_MIN_MR122, pitMax, Lframe, 0)
 	if a != b {
 		t.Errorf("pitchOl non-deterministic: %d != %d", a, b)
 	}

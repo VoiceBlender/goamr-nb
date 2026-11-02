@@ -19,7 +19,6 @@ func TestEncodeRejectsWrongFrameSize(t *testing.T) {
 }
 
 // Encode produces an RFC 4867 payload of the correct length for every mode.
-// (The DSP is stubbed for now, so payload bytes are zero — length is the gate.)
 func TestEncodeProducesCorrectLength(t *testing.T) {
 	samples := make([]int16, FrameSamples)
 	for i := range samples {

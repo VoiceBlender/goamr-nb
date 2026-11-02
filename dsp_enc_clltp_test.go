@@ -27,7 +27,7 @@ func TestClLtpMatchedTarget(t *testing.T) {
 	yl := make([]int16, cL_SUBFR)
 
 	var st pitchFrState
-	r := st.clLtp(dMR59, 0, Top, h1, exc, excOff, res2, xn, xn2, yl)
+	r := st.clLtp(&tonStabState{}, 0, dMR59, 0, Top, h1, exc, excOff, res2, xn, xn2, yl)
 
 	if r.T0 != T {
 		t.Errorf("lag %d, want %d", r.T0, T)
@@ -66,7 +66,7 @@ func TestClLtpMR122Index(t *testing.T) {
 	yl := make([]int16, cL_SUBFR)
 
 	var st pitchFrState
-	r := st.clLtp(dMR122, 0, Top, h1, exc, excOff, res2, xn, xn2, yl)
+	r := st.clLtp(&tonStabState{}, 0, dMR122, 0, Top, h1, exc, excOff, res2, xn, xn2, yl)
 	if !r.hasGainPitIndex {
 		t.Fatal("MR122 should produce a gain_pit index")
 	}

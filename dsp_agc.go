@@ -26,6 +26,16 @@ func energyOld(in []int16, lTrm int) int32 {
 // energyNew returns the energy of a signal (>>4 scaled), falling back to
 // energyOld on saturation. Mirrors energy_new.
 func energyNew(in []int16, lTrm int) int32 {
+	// The terms are non-negative, so the saturating L_mac chain saturates
+	// (or hits one of its quirks) only if the plain sum reaches MAX_32: below
+	// that, the plain sum is the result.
+	var s64 int64
+	for _, v := range in[:lTrm] {
+		s64 += int64(v) * int64(v)
+	}
+	if s64 < maxInt32/2 {
+		return int32(s64<<1) >> 4
+	}
 	var s int32
 	for i := 0; i < lTrm; i++ {
 		s = L_mac(s, in[i], in[i])

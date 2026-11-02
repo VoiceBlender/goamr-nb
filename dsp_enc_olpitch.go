@@ -4,15 +4,14 @@ package amrnb
 // (Pitch_ol, Lag_max) and calc_cor.cpp (comp_corr). pitchOl scales the weighted
 // speech, computes its autocorrelation over the pitch-lag range, finds the best
 // lag in three sub-ranges, and selects among them favouring longer lags unless
-// a shorter lag's normalized correlation is significantly stronger. The DTX/VAD
-// tone-detection side path is omitted (dtx=0). Bit-exact with the reference for
-// the active-speech path.
+// a shorter lag's normalized correlation is significantly stronger. With DTX
+// on (vad != nil) it also feeds the VAD's tone and complexity detectors.
 
 const cTHRESHOLD = 27853 // 0.85, the open-loop lag-selection threshold
 
 // lagMax finds the lag in [lagMin, lagMax] with maximum correlation and returns
-// it together with its normalized correlation. Mirrors Lag_max (dtx=0 path).
-func lagMax(corr []int32, scaled []int16, pitMax int, scalFac, scalFlag int16, Lframe, lagMax, lagMin int) (int16, int16) {
+// it together with its normalized correlation. Mirrors Lag_max.
+func lagMax(vad *vadState, corr []int32, scaled []int16, pitMax int, scalFac, scalFlag int16, Lframe, lagMax, lagMin int) (int16, int16) {
 	max := int32(minInt32)
 	pMax := int16(lagMax)
 	for i := lagMax; i >= lagMin; i-- {
@@ -29,6 +28,9 @@ func lagMax(corr []int32, scaled []int16, pitMax int, scalFac, scalFlag int16, L
 		t0 += v * v
 	}
 	t0 <<= 1
+	if vad != nil {
+		vad.toneDetection(max, t0)
+	}
 	t0 = invSqrt(t0)
 	if scalFlag != 0 {
 		if t0 > 0x3fffffff {
@@ -62,8 +64,12 @@ func lagMax(corr []int32, scaled []int16, pitMax int, scalFac, scalFlag int16, L
 
 // pitchOl returns the open-loop pitch lag for the weighted speech in
 // signal[off-pitMax : off+Lframe], using the given pitch-lag bounds and frame
-// length. Mirrors Pitch_ol (dtx=0). signal[off] is the current frame start.
-func pitchOl(mode int, signal []int16, off, pitMin, pitMax, Lframe int) int16 {
+// length. Mirrors Pitch_ol. signal[off] is the current frame start; idx is
+// the half-frame (1 for the second, or for the whole frame in MR475/MR515).
+func pitchOl(vad *vadState, mode int, signal []int16, off, pitMin, pitMax, Lframe, idx int) int16 {
+	if vad != nil {
+		vad.toneDetectionUpdate(mode == dMR475 || mode == dMR515)
+	}
 	// energy of signal[-pitMax .. Lframe-1]
 	var t0 int32
 	overflow := false
@@ -119,12 +125,16 @@ func pitchOl(mode int, signal []int16, off, pitMin, pitMax, Lframe int) int16 {
 	}
 
 	j := pitMin << 2
-	pMax1, max1 := lagMax(corr, scaled, pitMax, scalFac, scalFlag, Lframe, pitMax, j)
+	pMax1, max1 := lagMax(vad, corr, scaled, pitMax, scalFac, scalFlag, Lframe, pitMax, j)
 	i := j - 1
 	j = pitMin << 1
-	pMax2, max2 := lagMax(corr, scaled, pitMax, scalFac, scalFlag, Lframe, i, j)
+	pMax2, max2 := lagMax(vad, corr, scaled, pitMax, scalFac, scalFlag, Lframe, i, j)
 	i = j - 1
-	pMax3, max3 := lagMax(corr, scaled, pitMax, scalFac, scalFlag, Lframe, i, pitMin)
+	pMax3, max3 := lagMax(vad, corr, scaled, pitMax, scalFac, scalFlag, Lframe, i, pitMin)
+
+	if vad != nil && idx == 1 {
+		vad.bestCorrHp = hpMax(func(lag int) int32 { return corr[lag] }, scaled, pitMax, Lframe, pitMax, pitMin)
+	}
 
 	if int16((int32(max1)*cTHRESHOLD)>>15) < max2 {
 		max1 = max2

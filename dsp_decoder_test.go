@@ -94,19 +94,43 @@ func TestDecodeStateContinuity(t *testing.T) {
 	}
 }
 
-// TestDecodeBadFrameSilence confirms a not-OK (bad) speech frame currently
-// yields silence (concealment not yet ported) without error.
-func TestDecodeBadFrameSilence(t *testing.T) {
-	d := NewDecoder(DecoderConfig{OctetAligned: true})
-	fr := frame{ft: FTMode0590, q: false, data: lcgBytes(7, Mode0590.Bytes())}
-	payload := packPayloadOctet(noCMR, []frame{fr})
-	pcm, err := d.Decode(payload)
+// TestDecodeBadFrameConceals checks that a speech frame with Q=0 is concealed
+// from the previous frames rather than decoded from its bits: the output
+// continues the signal and differs from decoding the same bits with Q=1.
+func TestDecodeBadFrameConceals(t *testing.T) {
+	enc, _ := NewEncoder(EncoderConfig{Mode: Mode0590, OctetAligned: true})
+	frames := benchGenFrames(12)
+	var payloads [][]byte
+	for _, f := range frames {
+		p, err := enc.Encode(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, p)
+	}
+	good := NewDecoder(DecoderConfig{OctetAligned: true})
+	bad := NewDecoder(DecoderConfig{OctetAligned: true})
+	for _, p := range payloads[:11] {
+		good.Decode(p)
+		bad.Decode(p)
+	}
+	last := append([]byte(nil), payloads[11]...)
+	want, _ := good.Decode(last)
+	last[1] &^= 0x04 // clear the Q bit
+	got, err := bad.Decode(last)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range pcm {
-		if s != 0 {
-			t.Fatalf("bad frame: expected silence, got %d", s)
-		}
+	var e float64
+	same := true
+	for i := range got {
+		e += float64(got[i]) * float64(got[i])
+		same = same && got[i] == want[i]
+	}
+	if same {
+		t.Fatal("Q=0 frame decoded like a good frame")
+	}
+	if e == 0 {
+		t.Fatal("Q=0 frame decoded to silence, want concealment")
 	}
 }

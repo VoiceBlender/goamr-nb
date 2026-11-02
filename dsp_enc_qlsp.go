@@ -119,9 +119,10 @@ func vqSubvec4(lsfR1, dico, wf1 []int16, dicoSize int) int16 {
 
 // qPlsf3 quantizes the analysis LSPs for the given mode into three split-VQ
 // indices and the quantized LSP vector, updating the predictor. Mirrors
-// Q_plsf_3 (non-DTX path). Returns the three indices.
+// Q_plsf_3 for the speech modes (qPlsf3DTX is its MRDTX path). Returns the
+// three indices.
 func (st *qPlsfState) qPlsf3(mode int, lsp1 []int16, lsp1q []int16) [3]int16 {
-	var lsf1, wf1, lsfP, lsfR1, lsf1q [cM]int16
+	var lsf1, wf1, lsfP, lsfR1 [cM]int16
 
 	lspLsf(lsp1, lsf1[:], cM)
 	lsfWt(lsf1[:], wf1[:])
@@ -148,14 +149,51 @@ func (st *qPlsfState) qPlsf3(mode int, lsp1 []int16, lsp1q []int16) [3]int16 {
 		indice[2] = vqSubvec4(lsfR1[6:], dico3_lsf_3, wf1[6:], cDICO3_SIZE)
 	}
 
+	st.finish(&lsfR1, &lsfP, lsp1q)
+	return indice
+}
+
+// finish forms the quantized LSPs from the quantized residual and the
+// prediction, and stores the residual for the next frame's prediction.
+func (st *qPlsfState) finish(lsfR1, lsfP *[cM]int16, lsp1q []int16) {
+	var lsf1q [cM]int16
 	for i := 0; i < cM; i++ {
-		lsf1q[i] = add(lsfR1[i], lsfP[i])
+		lsf1q[i] = lsfR1[i] + lsfP[i] // plain Word16 sum, as in Q_plsf_3
 		st.pastRQ[i] = lsfR1[i]
 	}
-
 	reorderLsf(lsf1q[:], cLSF_GAP, cM)
 	lsfLsp(lsf1q[:], lsp1q, cM)
-	return indice
+}
+
+// qPlsf3DTX quantizes the comfort-noise LSPs of a SID frame: it picks the
+// past_rq_init predictor state that best fits them (predInit), then
+// quantizes the residual with the default codebooks. Mirrors the MRDTX path
+// of Q_plsf_3.
+func (st *qPlsfState) qPlsf3DTX(lsp1 []int16, lsp1q []int16) (indice [3]int16, predInit int16) {
+	var lsf1, wf1, lsfP, lsfR1, tempP, tempR1 [cM]int16
+	lspLsf(lsp1, lsf1[:], cM)
+	lsfWt(lsf1[:], wf1[:])
+
+	minErr := int32(0x7fffffff)
+	for j := 0; j < len(past_rq_init)/cM; j++ {
+		var err int32
+		for i := 0; i < cM; i++ {
+			tempP[i] = mean_lsf_3[i] + past_rq_init[j*cM+i]
+			tempR1[i] = lsf1[i] - tempP[i]
+			err += (int32(tempR1[i]) * int32(tempR1[i])) << 1
+		}
+		if err < minErr {
+			minErr = err
+			lsfR1, lsfP = tempR1, tempP
+			copy(st.pastRQ[:], past_rq_init[j*cM:j*cM+cM])
+			predInit = int16(j)
+		}
+	}
+	indice[0] = vqSubvec3(lsfR1[0:], dico1_lsf_3, wf1[0:], cDICO1_SIZE, false)
+	indice[1] = vqSubvec3(lsfR1[3:], dico2_lsf_3, wf1[3:], cDICO2_SIZE, false)
+	indice[2] = vqSubvec4(lsfR1[6:], dico3_lsf_3, wf1[6:], cDICO3_SIZE)
+	st.finish(&lsfR1, &lsfP, lsp1q)
+	return indice, predInit
 }
 
 // LSF-5 split-VQ codebook sizes (q_plsf_5_tbl.cpp).

@@ -55,83 +55,86 @@ func abs_s(a int16) int16 {
 	return a
 }
 
-// shl returns a shifted left by b bits with saturation; negative b shifts right.
+// shl returns a shifted left by b bits with saturation; negative b shifts
+// right. Mirrors the opencore-amrnb inline shl, which differs from ETSI shl for
+// negative shifts: a right shift by 15 or more gives 0, also for negative a.
+// The C shifts an int by the count as given, which x86 and arm64 take modulo
+// 32, so this does too.
 func shl(a, b int16) int16 {
 	if b < 0 {
-		return shr(a, -b)
-	}
-	result := int32(a) << uint(b)
-	// Detect overflow by checking the shift is reversible.
-	if b >= 31 {
-		if a == 0 {
-			return 0
+		if -int32(b) < 15 {
+			return a >> uint(-b)
 		}
+		return 0
+	}
+	s := uint(b) & 31
+	out := int16(int32(a) << s)
+	if int32(out)>>s != int32(a) {
+		return (a >> 15) ^ maxInt16
+	}
+	return out
+}
+
+// shr returns a shifted right by b bits (arithmetic, counts above 15 act as
+// 15); negative b shifts left with saturation. Mirrors opencore-amrnb shr.cpp.
+func shr(a, b int16) int16 {
+	if b == 0 {
+		return a
+	}
+	if b > 0 {
+		if b > 15 {
+			b = 15
+		}
+		return a >> uint(b)
+	}
+	n := -int32(b)
+	if n > 15 || n < 0 {
+		n = 15
+	}
+	out := int16(int32(a) << uint(n))
+	if out>>uint(n) != a {
 		if a > 0 {
 			return maxInt16
 		}
 		return minInt16
 	}
-	return satWord16(result)
+	return out
 }
 
-// shr returns a shifted right by b bits (arithmetic); negative b shifts left.
-func shr(a, b int16) int16 {
-	if b < 0 {
-		return shl(a, -b)
-	}
-	if b >= 15 {
-		if a < 0 {
-			return -1
-		}
-		return 0
-	}
-	return int16(int32(a) >> uint(b))
-}
-
-// L_shl returns the saturated 32-bit left shift; negative b shifts right.
+// L_shl returns the saturated 32-bit left shift; negative b shifts right
+// (by 31 or more gives 0, also for negative a). Mirrors the opencore-amrnb
+// inline L_shl; left shift counts are taken modulo 32, as on x86 and arm64.
 func L_shl(a int32, b int16) int32 {
-	if b <= 0 {
-		if b == 0 {
-			return a
+	if b > 0 {
+		s := uint(b) & 31
+		out := a << s
+		if out>>s != a {
+			return (a >> 31) ^ maxInt32
 		}
-		return L_shr(a, -b)
+		return out
 	}
-	if b >= 31 {
-		if a > 0 {
-			return maxInt32
-		}
-		if a < 0 {
-			return minInt32
-		}
-		return 0
+	if -int32(b) < 31 {
+		return a >> uint(-b)
 	}
-	// The reference shifts one bit at a time, saturating as soon as the value
-	// reaches the overflow region. Since |a<<k| grows monotonically, saturation
-	// is decided by the last pre-shift value a<<(b-1): >= 2^30 -> MAX_32,
-	// < -2^30 -> MIN_32; otherwise a<<b fits. Computed in int64 this is O(1) and
-	// bit-identical to the loop.
-	last := int64(a) << uint(b-1)
-	if last >= 0x40000000 {
-		return maxInt32
-	}
-	if last < -0x40000000 {
-		return minInt32
-	}
-	return a << uint(b)
+	return 0
 }
 
-// L_shr returns the 32-bit arithmetic right shift; negative b shifts left.
+// L_shr returns the 32-bit arithmetic right shift (by 31 or more gives 0, also
+// for negative a); negative b shifts left with saturation. Mirrors the
+// opencore-amrnb inline L_shr.
 func L_shr(a int32, b int16) int32 {
-	if b < 0 {
-		return L_shl(a, -b)
-	}
-	if b >= 31 {
-		if a < 0 {
-			return -1
+	if b > 0 {
+		if b < 31 {
+			return a >> uint(b)
 		}
 		return 0
 	}
-	return a >> uint(b)
+	s := uint(-int32(b)) & 31
+	out := a << s
+	if out>>s != a {
+		return (a >> 31) ^ maxInt32
+	}
+	return out
 }
 
 // mult returns satWord16((a*b)>>15).
@@ -156,8 +159,24 @@ func L_add(a, b int32) int32 { return satWord32(int64(a) + int64(b)) }
 // L_sub returns the saturated 32-bit difference.
 func L_sub(a, b int32) int32 { return satWord32(int64(a) - int64(b)) }
 
-// L_mac returns acc + (a*b<<1), saturated.
-func L_mac(acc int32, a, b int16) int32 { return L_add(acc, L_mult(a, b)) }
+// L_mac returns acc + (a*b<<1), saturated. Mirrors the opencore-amrnb inline
+// L_mac, including its two departures from L_add(acc, L_mult(a, b)): a
+// -32768*-32768 product gives MAX_32 whatever acc is, and the overflow check is
+// skipped when acc equals a*b (so the sum may wrap).
+func L_mac(acc int32, a, b int16) int32 {
+	p := int32(a) * int32(b)
+	if p == 0x40000000 {
+		return maxInt32
+	}
+	sum := p<<1 + acc
+	if acc^p > 0 && (sum^acc)>>31 != 0 {
+		if acc>>31 != 0 {
+			return minInt32
+		}
+		return maxInt32
+	}
+	return sum
+}
 
 // L_msu returns acc - (a*b<<1), saturated.
 func L_msu(acc int32, a, b int16) int32 { return L_sub(acc, L_mult(a, b)) }
@@ -199,63 +218,54 @@ func L_deposit_h(a int16) int32 { return int32(a) << 16 }
 // L_deposit_l sign-extends a 16-bit value into a 32-bit word.
 func L_deposit_l(a int16) int32 { return int32(a) }
 
-// norm_l returns the number of left shifts needed to normalize a (0 for 0).
+// norm_l returns the number of left shifts that normalize a (0 for 0).
+// Mirrors opencore-amrnb norm_l.cpp, which normalizes |a| rather than ^a for
+// negative a, and so returns one less than ETSI norm_l for a = -2^k.
 func norm_l(a int32) int16 {
 	if a == 0 {
 		return 0
 	}
-	if a == -1 {
-		return 31
-	}
-	if a < 0 {
-		a = ^a
-	}
+	y := a - b2i32(a < 0)
+	y ^= y >> 31
 	var n int16
-	for a < 0x40000000 {
-		a <<= 1
+	for y&0x40000000 == 0 {
+		y <<= 1
 		n++
 	}
 	return n
 }
 
-// norm_s returns the number of left shifts needed to normalize a 16-bit value.
+// norm_s returns the number of left shifts that normalize a 16-bit value (0
+// for 0). Mirrors opencore-amrnb norm_s.cpp (see norm_l).
 func norm_s(a int16) int16 {
 	if a == 0 {
 		return 0
 	}
-	if a == -1 {
-		return 15
-	}
-	v := a
-	if v < 0 {
-		v = ^v
-	}
+	y := a - int16(b2i32(a < 0))
+	y ^= y >> 15
 	var n int16
-	for v < 0x4000 {
-		v <<= 1
+	for y&0x4000 == 0 {
+		y <<= 1
 		n++
 	}
 	return n
 }
 
+func b2i32(b bool) int32 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // div_s returns the fractional division (a/b)<<15 for 0 <= a <= b, b != 0.
 func div_s(a, b int16) int16 {
-	if a == 0 {
-		return 0
+	if a > b || a <= 0 {
+		return 0 // opencore-amrnb div_s.cpp: no division for a > b or a < 0
 	}
 	if a == b {
 		return maxInt16
 	}
-	num := int32(a)
-	den := int32(b)
-	var quot int32
-	for i := 0; i < 15; i++ {
-		quot <<= 1
-		num <<= 1
-		if num >= den {
-			num -= den
-			quot++
-		}
-	}
-	return int16(quot)
+	// The reference's 15-step restoring division computes floor(a*2^15 / b).
+	return int16((int32(a) << 15) / int32(b))
 }

@@ -193,7 +193,8 @@ func (st *pitchFrState) pitchFr(mode int, Top []int16, exc []int16, excOff int, 
 
 	tMin := int16(int(t0min) - cL_INTER_SRCH)
 	tMax := int16(int(t0max) + cL_INTER_SRCH)
-	corr := make([]int16, int(tMax)-int(tMin)+1)
+	var corrArr [40]int16 // corr_v[40] in Pitch_fr: the range is at most 40 lags
+	corr := corrArr[:int(tMax)-int(tMin)+1]
 	normCorr(exc, excOff, xn, h, Lsubfr, tMin, tMax, corr)
 
 	max := corr[int(t0min)-int(tMin)]

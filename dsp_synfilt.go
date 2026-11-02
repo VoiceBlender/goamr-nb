@@ -24,29 +24,24 @@ func synClamp(s int32) int16 {
 // samples; if update is true it is refreshed with the last M outputs. Mirrors
 // Syn_filt.
 func synFilt(a, x, y []int16, lg int, mem []int16, update bool) {
-	var yy [cL_FRAME + cM]int16
-	copy(yy[:cM], mem[:cM])
-
-	af := a[:cMP1] // hoist bounds: a[0..M]
-	xf := x[:lg]
-	for i := 0; i < lg; i++ {
-		s := int32(0x800) + int32(af[0])*int32(xf[i])
-		yw := yy[i : i+cM] // yy[cM+i-j] == yw[cM-j], all in [0,cM)
-		s -= int32(af[1]) * int32(yw[cM-1])
-		s -= int32(af[2]) * int32(yw[cM-2])
-		s -= int32(af[3]) * int32(yw[cM-3])
-		s -= int32(af[4]) * int32(yw[cM-4])
-		s -= int32(af[5]) * int32(yw[cM-5])
-		s -= int32(af[6]) * int32(yw[cM-6])
-		s -= int32(af[7]) * int32(yw[cM-7])
-		s -= int32(af[8]) * int32(yw[cM-8])
-		s -= int32(af[9]) * int32(yw[cM-9])
-		s -= int32(af[10]) * int32(yw[cM-10])
+	// The ten past outputs live in locals (y1 the latest), so no history
+	// buffer is copied or zeroed per call. x may alias y: x[i] is read
+	// before y[i] is written. mem may alias y too; it is read first.
+	af := a[:cMP1]
+	a0, a1, a2, a3, a4, a5 := int32(af[0]), int32(af[1]), int32(af[2]), int32(af[3]), int32(af[4]), int32(af[5])
+	a6, a7, a8, a9, a10 := int32(af[6]), int32(af[7]), int32(af[8]), int32(af[9]), int32(af[10])
+	m := mem[:cM]
+	y1, y2, y3, y4, y5 := int32(m[9]), int32(m[8]), int32(m[7]), int32(m[6]), int32(m[5])
+	y6, y7, y8, y9, y10 := int32(m[4]), int32(m[3]), int32(m[2]), int32(m[1]), int32(m[0])
+	xf, yf := x[:lg], y[:lg]
+	for i := range xf {
+		s := 0x800 + a0*int32(xf[i]) - a1*y1 - a2*y2 - a3*y3 - a4*y4 - a5*y5 -
+			a6*y6 - a7*y7 - a8*y8 - a9*y9 - a10*y10
 		out := synClamp(s)
-		yy[cM+i] = out
-		y[i] = out
+		yf[i] = out
+		y10, y9, y8, y7, y6 = y9, y8, y7, y6, y5
+		y5, y4, y3, y2, y1 = y4, y3, y2, y1, int32(out)
 	}
-
 	if update {
 		copy(mem[:cM], y[lg-cM:lg])
 	}

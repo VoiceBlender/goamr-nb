@@ -6,7 +6,7 @@ package amrnb
 // a fixed curve and, when the previous frame tracked pitch well, by a window
 // centred on the running median lag — then adapts whether to keep weighting.
 // It also emits a per-half-frame gain flag that gates the median update and the
-// closed-loop lag history. Bit-exact with the reference (non-DTX path).
+// closed-loop lag history. With DTX on it also feeds the VAD.
 
 // pitchOLWghtState is the weighted open-loop pitch state. Mirrors
 // pitchOLWghtState.
@@ -39,8 +39,8 @@ func compCorr(sig []int16, sigOff, Lframe, pitMax, pitMin int, corr []int32, cor
 }
 
 // lagMaxWght finds the best (most weighted-correlated) lag and the open-loop
-// gain flag. Mirrors the weighted Lag_max (non-DTX path: cor_max is unused).
-func lagMaxWght(corr []int32, corrOff int, sig []int16, sigOff int, Lframe, lagMax, lagMin, oldLag, wghtFlg int16) (pMax, gainFlg int16) {
+// gain flag. Mirrors the weighted Lag_max (cor_max is unused).
+func lagMaxWght(vad *vadState, corr []int32, corrOff int, sig []int16, sigOff int, Lframe, lagMax, lagMin, oldLag, wghtFlg int16) (pMax, gainFlg int16) {
 	wwi := 250                             // &corrweight[250]
 	wei := 123 + int(lagMax) - int(oldLag) // &corrweight[123 + lag_max - old_lag]
 	max := int32(-2147483648)              // MIN_32
@@ -67,6 +67,10 @@ func lagMaxWght(corr []int32, corrOff int, sig []int16, sigOff int, Lframe, lagM
 		t0 = L_mac(t0, a, b)
 		t1 = L_mac(t1, b, b)
 	}
+	if vad != nil {
+		vad.toneDetectionUpdate(false)
+		vad.toneDetection(t0, t1)
+	}
 	temp := round_(t1)
 	t1 = L_msu(t0, temp, 13107) // t0 - round(t1)*0.4
 	gainFlg = round_(t1)
@@ -75,9 +79,9 @@ func lagMaxWght(corr []int32, corrOff int, sig []int16, sigOff int, Lframe, lagM
 
 // pitchOlWgh runs the MR102 weighted open-loop pitch over one half-frame of the
 // weighted speech (sig[sigOff-pitMax : sigOff+Lframe]), updating the state and
-// the gain flag, and maintaining the median-lag history. Mirrors Pitch_ol_wgh
-// (non-DTX). idx selects the half-frame (0 or 1).
-func (st *pitchOLWghtState) pitchOlWgh(sig []int16, sigOff, pitMin, pitMax, Lframe int, oldLags, olGainFlg []int16, idx int) int16 {
+// the gain flag, and maintaining the median-lag history. Mirrors Pitch_ol_wgh;
+// idx selects the half-frame (0 or 1).
+func (st *pitchOLWghtState) pitchOlWgh(vad *vadState, sig []int16, sigOff, pitMin, pitMax, Lframe int, oldLags, olGainFlg []int16, idx int) int16 {
 	// energy of the (history + frame) signal, to choose the scaling
 	var t0 int32
 	for i := -pitMax; i < Lframe; i++ {
@@ -109,7 +113,7 @@ func (st *pitchOLWghtState) pitchOlWgh(sig []int16, sigOff, pitMin, pitMax, Lfra
 	corrOff := pitMax
 	compCorr(scal, scalOff, Lframe, pitMax, pitMin, corr, corrOff)
 
-	pMax1, gainFlg := lagMaxWght(corr, corrOff, scal, scalOff, int16(Lframe),
+	pMax1, gainFlg := lagMaxWght(vad, corr, corrOff, scal, scalOff, int16(Lframe),
 		int16(pitMax), int16(pitMin), st.oldT0Med, st.wghtFlg)
 	olGainFlg[idx] = gainFlg
 
@@ -129,6 +133,9 @@ func (st *pitchOLWghtState) pitchOlWgh(sig []int16, sigOff, pitMin, pitMax, Lfra
 		st.wghtFlg = 0
 	} else {
 		st.wghtFlg = 1
+	}
+	if vad != nil && idx == 1 {
+		vad.bestCorrHp = hpMax(func(lag int) int32 { return corr[corrOff-lag] }, scal, scalOff, Lframe, pitMax, pitMin)
 	}
 	return pMax1
 }

@@ -2,122 +2,89 @@ package amrnb
 
 import (
 	"bytes"
-	"encoding/binary"
-	"os"
-	"os/exec"
-	"strconv"
 	"testing"
 )
 
-// TestEncDiffAgainstCReference encodes identical PCM frames with this Go encoder
-// and the Apache-2.0 opencore-amrnb C reference, comparing the packed bitstream.
-// Set AMRNB_ENC to the compiled reference harness: it reads 160 int16 LE/frame
-// on stdin for the mode given as argv[1] and writes storage-format frames (1 ToC
-// byte + ceil(bits/8) packed speech bytes each). The harness is built separately
-// (out of scope here); this test SKIPS until AMRNB_ENC is set.
+// TestEncDiffAgainstCReference encodes identical PCM with the public Encoder
+// (both payload formats) and with the stock opencore-amrnb
+// Encoder_Interface_Encode, and requires identical frames: speech from quiet
+// to clipped, pathological input (tones, DTMF, square waves, noise), mode
+// switches, and DTX on, where the reference's NO_DATA frames must be the
+// Encoder's empty payloads. Set AMRNB_ENC (see make diff).
 func TestEncDiffAgainstCReference(t *testing.T) {
-	bin := os.Getenv("AMRNB_ENC")
-	if bin == "" {
-		t.Skip("set AMRNB_ENC to the opencore-amrnb reference encoder harness to run")
+	encHarness(t)
+	speech, stress, dtx := testSignal(), stressSignal(), dtxSignal()
+	checkDTXCoverage(t, refEncode(t, dtx, fixedMode(Mode0740), true))
+	for m := Mode0475; m < numSpeechModes; m++ {
+		name := benchModeNames[m]
+		t.Run("speech/"+name, func(t *testing.T) { compareEncoders(t, speech, fixedMode(m), false) })
+		t.Run("stress/"+name, func(t *testing.T) { compareEncoders(t, stress, fixedMode(m), false) })
+		t.Run("dtx/"+name, func(t *testing.T) { compareEncoders(t, dtx, fixedMode(m), true) })
+		t.Run("dtxstress/"+name, func(t *testing.T) { compareEncoders(t, stress, fixedMode(m), true) })
+		t.Run("dtxspeech/"+name, func(t *testing.T) { compareEncoders(t, speech, fixedMode(m), true) })
 	}
-	const frames = 20
-
-	// Deterministic speech-like input (sum of tones), matching the benchmark
-	// generator's shape so the encoder exercises real pitch/codebook paths.
-	raw := new(bytes.Buffer)
-	pcm := make([][]int16, frames)
-	phase := 0.0
-	for f := 0; f < frames; f++ {
-		s := make([]int16, FrameSamples)
-		for i := range s {
-			s[i] = int16(5000*sinApprox(phase) + 2000*sinApprox(phase*2.7))
-			phase += 2 * 3.14159265 * 300 / SampleRate
-		}
-		pcm[f] = s
-		binary.Write(raw, binary.LittleEndian, s)
-	}
-
-	for mode := Mode0475; mode < numSpeechModes; mode++ {
-		t.Run(benchModeNames[mode], func(t *testing.T) {
-			packed := mode.Bytes() // speech bytes, excluding ToC
-			frameLen := 1 + packed
-
-			cmd := exec.Command(bin, strconv.Itoa(int(mode)))
-			cmd.Stdin = bytes.NewReader(raw.Bytes())
-			var cout bytes.Buffer
-			cmd.Stdout = &cout
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("C encoder harness: %v", err)
-			}
-			cbytes := cout.Bytes()
-			if len(cbytes) != frames*frameLen {
-				t.Fatalf("C produced %d bytes, want %d", len(cbytes), frames*frameLen)
-			}
-
-			var enc encoderState
-			enc.reset()
-			for f := 0; f < frames; f++ {
-				goPacked, err := enc.encodeFrame(mode, pcm[f])
-				if err != nil {
-					t.Fatalf("frame %d: Go encode: %v", f, err)
-				}
-				cPacked := cbytes[f*frameLen+1 : (f+1)*frameLen] // skip ToC byte
-				if bytes.Equal(goPacked, cPacked) {
-					continue
-				}
-				// Localize: first differing internal parameter (mimeUnsort yields
-				// the parameter array in decoder-consumption order).
-				gp := mimeUnsort(goPacked, mode)
-				cp := mimeUnsort(cPacked, mode)
-				first := -1
-				for i := range gp {
-					if gp[i] != cp[i] {
-						first = i
-						break
-					}
-				}
-				field := "param" + strconv.Itoa(first)
-				if mode == Mode0475 {
-					field = fieldOfMR475(first)
-				}
-				t.Fatalf("frame %d: diverges at internal param %d (%s): go=%d c=%d",
-					f, first, field, gp[first], cp[first])
-			}
-			t.Logf("mode %d: all %d frames bit-exact", mode, frames)
-		})
-	}
+	t.Run("switch", func(t *testing.T) { compareEncoders(t, speech, cycleModes(7), false) })
+	t.Run("switch/everyframe", func(t *testing.T) { compareEncoders(t, speech, cycleModes(1), false) })
+	t.Run("switch/stress", func(t *testing.T) { compareEncoders(t, stress, cycleModes(3), false) })
+	t.Run("dtxswitch", func(t *testing.T) { compareEncoders(t, dtx, cycleModes(5), true) })
+	t.Run("dtxswitch/everyframe", func(t *testing.T) { compareEncoders(t, dtx, cycleModes(1), true) })
 }
 
-// fieldOfMR475 names an MR475 internal parameter index: LSF(3) then four
-// subframes of [pitch, cb-pos, cb-sign], with the joint gain index appended
-// after the codebook of each even subframe.
-func fieldOfMR475(i int) string {
-	if i < 0 {
-		return "?"
-	}
-	if i < 3 {
-		return "LSF" + strconv.Itoa(i)
-	}
-	p := i - 3
-	for sf := 0; sf < 4; sf++ {
-		even := sf%2 == 0
-		blk := 3 // pitch + cb-pos + cb-sign
-		if even {
-			blk = 4 // + joint gain
+// compareEncoders encodes pcm with the reference and with the public Encoder
+// in both payload formats, frame f in mode modeOf(f), and requires the same
+// frames.
+func compareEncoders(t *testing.T, pcm []int16, modeOf func(int) Mode, dtx bool) {
+	t.Helper()
+	want := refEncode(t, pcm, modeOf, dtx)
+	for _, octet := range []bool{true, false} {
+		enc, err := NewEncoder(EncoderConfig{Mode: modeOf(0), OctetAligned: octet, DTX: dtx})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if p < blk {
-			switch p {
-			case 0:
-				return "sf" + strconv.Itoa(sf) + ".pitch"
-			case 1:
-				return "sf" + strconv.Itoa(sf) + ".cbPos"
-			case 2:
-				return "sf" + strconv.Itoa(sf) + ".cbSign"
-			default:
-				return "sf" + strconv.Itoa(sf) + ".gain"
+		format := payloadFormat{octetAligned: octet}
+		for i, rf := range want {
+			enc.SetMode(modeOf(i))
+			p, err := enc.Encode(pcm[i*FrameSamples : (i+1)*FrameSamples])
+			if err != nil {
+				t.Fatalf("frame %d: %v", i, err)
+			}
+			if refFT(rf) == FTNoData {
+				if len(p) != 0 {
+					t.Fatalf("octet=%v frame %d: payload of %d bytes, want none (NO_DATA)", octet, i, len(p))
+				}
+				continue
+			}
+			_, frames, err := unpackPayload(p, format)
+			if err != nil || len(frames) != 1 {
+				t.Fatalf("octet=%v frame %d: payload %x: %v", octet, i, p, err)
+			}
+			f := frames[0]
+			if f.ft != refFT(rf) || !f.q || !bytes.Equal(f.data, rf[1:]) {
+				t.Fatalf("octet=%v frame %d (mode %d): FT %d %x, want FT %d %x", octet, i, modeOf(i), f.ft, f.data, refFT(rf), rf[1:])
 			}
 		}
-		p -= blk
 	}
-	return "?tail"
+	t.Logf("%d frames bit-exact", len(want))
+}
+
+// checkDTXCoverage requires a DTX stream to hold speech, SID_FIRST,
+// SID_UPDATE and NO_DATA frames, so that the DTX tests exercise them all.
+func checkDTXCoverage(t *testing.T, frames []refFrame) {
+	t.Helper()
+	var speech, first, update, noData int
+	for _, f := range frames {
+		switch ft := refFT(f); {
+		case ft <= FTMode1220:
+			speech++
+		case ft == FTSID && f[1+35/8]&(0x80>>(35%8)) != 0:
+			update++
+		case ft == FTSID:
+			first++
+		case ft == FTNoData:
+			noData++
+		}
+	}
+	if speech == 0 || first == 0 || update == 0 || noData == 0 {
+		t.Fatalf("DTX test signal: %d speech, %d SID_FIRST, %d SID_UPDATE, %d NO_DATA frames; want all", speech, first, update, noData)
+	}
 }

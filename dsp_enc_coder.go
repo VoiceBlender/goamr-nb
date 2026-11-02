@@ -10,8 +10,9 @@ package amrnb
 // Scope: the active-speech path for all eight modes — MR515/MR59/MR67/MR74/MR102
 // via Qua_gain, MR122 via q_gain_code, MR475 via the joint two-subframe VQ
 // (mr475Loop), and MR795 via the gain-adapted quantizer. MR102 uses the weighted
-// open-loop pitch (pitchOlWgh). DTX/VAD is always-active. All eight modes are
-// bit-exact with the opencore-amrnb reference encoder.
+// open-loop pitch (pitchOlWgh). With DTX on, the VAD and the DTX handler may
+// turn a frame into a comfort-noise (MRDTX) frame, which carries only the SID
+// parameters and resets the speech coder memories.
 
 // buffer offsets within oldSpeech (length cL_TOTAL).
 const (
@@ -36,6 +37,10 @@ type coderState struct {
 	pit     pitchFrState
 	pitWght pitchOLWghtState // weighted open-loop pitch (MR102 only)
 	lev     levinsonState
+	dtx     bool         // DTX on: run the VAD and code non-speech as comfort noise
+	vad     vadState     // voice activity detector (DTX only)
+	dtxEnc  dtxEncState  // comfort-noise encoder (DTX only)
+	ton     tonStabState // tone stabilizer
 
 	oldLags   [5]int16  // closed-loop lag history (MR102 weighted OLP)
 	olGainFlg [2]int16  // per-half-frame open-loop gain flag (MR102)
@@ -147,36 +152,79 @@ func (st *coderState) gainQuant(mode int, r clLtpResult, xn, xn2, y1, y2, code, 
 }
 
 // codAmr encodes one pre-processed 160-sample frame, returning the parameter
-// array (LSF indices followed by the per-subframe pitch/codebook/gain indices,
-// in prm2bits order). Mirrors cod_amr for the supported modes.
-func (st *coderState) codAmr(mode int, newSpeech []int16) ([]int16, error) {
+// array (in prm2bits order) and the mode actually used: mode, or dMRDTX for a
+// comfort-noise frame, whose array holds the five SID parameters. Mirrors
+// cod_amr.
+func (st *coderState) codAmr(mode int, newSpeech []int16) ([]int16, int) {
 	copy(st.oldSpeech[cNewSpchOff:], newSpeech[:cL_FRAME])
 
-	az := make([]int16, cNB_SUBFR*cMP1)
-	azQ := make([]int16, cNB_SUBFR*cMP1)
-	st.lpcAnalysis(mode, az)
-
-	prm := st.prmBuf[:len(bitno[Mode(mode)])] // reused; caller serializes it before the next frame
-	ap := st.lspS.lsp(mode, az, azQ, prm)
-
-	st.preBig(mode, 0, az)
-	st.preBig(mode, cL_FRAME_BY2, az)
-	var Top [2]int16
-	if mode == dMR475 || mode == dMR515 {
-		Top[0] = pitchOl(mode, st.oldWsp[:], cPIT_MAX, cPIT_MIN, cPIT_MAX, cL_FRAME)
-		Top[1] = Top[0]
-	} else {
-		Top[0] = st.olPitch(mode, 0)
-		Top[1] = st.olPitch(mode, cL_FRAME_BY2)
+	usedMode := mode
+	var computeSidFlag int16
+	var vad *vadState
+	if st.dtx {
+		vad = &st.vad
+		vadFlag := st.vad.vad1(st.oldSpeech[:], cNewSpchOff)
+		computeSidFlag = st.dtxEnc.txDtxHandler(vadFlag, &usedMode)
 	}
 
-	synth := make([]int16, cL_FRAME)
+	var az, azQ [cNB_SUBFR * cMP1]int16
+	st.lpcAnalysis(mode, az[:])
+
+	prm := st.prmBuf[:len(bitno[Mode(mode)])] // reused; caller serializes it before the next frame
+	var lspNew [cM]int16
+	ap := st.lspS.lsp(mode, usedMode, az[:], azQ[:], prm, lspNew[:])
+	if st.dtx {
+		st.dtxEnc.buffer(lspNew[:], st.oldSpeech[cNewSpchOff:])
+	}
+
+	var lspFlag int16
+	if usedMode == dMRDTX {
+		prm = st.prmBuf[:len(sidBitno)]
+		st.dtxEnc.encode(computeSidFlag, &st.lspS.q, &st.pred, prm)
+		for i := 0; i < cExcOff; i++ {
+			st.oldExc[i] = 0
+		}
+		st.memW0 = [cM]int16{}
+		st.memErr = [cM]int16{}
+		st.lspS.reset()
+		st.lspS.lspOld = lspNew
+		st.lspS.lspOldQ = lspNew
+		st.pit.reset()
+		st.sharp = 0
+	} else {
+		lspFlag = st.ton.checkLsp(st.lspS.lspOld[:])
+	}
+
+	st.preBig(mode, 0, az[:])
+	st.preBig(mode, cL_FRAME_BY2, az[:])
+	var Top [2]int16
+	if mode != dMR102 {
+		st.olGainFlg = [2]int16{} // ol_ltp clears the gain flags in the other modes
+	}
+	if mode == dMR475 || mode == dMR515 {
+		Top[0] = pitchOl(vad, mode, st.oldWsp[:], cPIT_MAX, cPIT_MIN, cPIT_MAX, cL_FRAME, 1)
+		Top[1] = Top[0]
+	} else {
+		Top[0] = st.olPitch(vad, mode, 0)
+		Top[1] = st.olPitch(vad, mode, cL_FRAME_BY2)
+	}
+	if st.dtx {
+		st.vad.pitchDetection(Top[:])
+	}
+
+	if usedMode == dMRDTX {
+		copy(st.oldWsp[:cPIT_MAX], st.oldWsp[cL_FRAME:cL_FRAME+cPIT_MAX])
+		copy(st.oldSpeech[:cL_TOTAL-cL_FRAME], st.oldSpeech[cL_FRAME:cL_TOTAL])
+		return prm, usedMode
+	}
+
+	var synth [cL_FRAME]int16
 	if mode == dMR475 {
-		st.mr475Loop(az, azQ, Top[:], prm, ap, synth)
+		st.mr475Loop(lspFlag, az[:], azQ[:], Top[:], prm, ap, synth[:])
 		copy(st.oldExc[:cExcOff], st.oldExc[cL_FRAME:cL_FRAME+cExcOff])
 		copy(st.oldWsp[:cPIT_MAX], st.oldWsp[cL_FRAME:cL_FRAME+cPIT_MAX])
 		copy(st.oldSpeech[:cL_TOTAL-cL_FRAME], st.oldSpeech[cL_FRAME:cL_TOTAL])
-		return prm, nil
+		return prm, usedMode
 	}
 	for subfrNr := 0; subfrNr < cNB_SUBFR; subfrNr++ {
 		iSubfr := subfrNr * cL_SUBFR
@@ -196,7 +244,7 @@ func (st *coderState) codAmr(mode int, newSpeech []int16) ([]int16, error) {
 
 		xn2 := make([]int16, cL_SUBFR)
 		y1 := make([]int16, cL_SUBFR)
-		r := st.pit.clLtp(mode, iSubfr, Top[:], h1, st.oldExc[:], excBase, res2, xn, xn2, y1)
+		r := st.pit.clLtp(&st.ton, lspFlag, mode, iSubfr, Top[:], h1, st.oldExc[:], excBase, res2, xn, xn2, y1)
 		// MR102: feed the first/last closed-loop lag back into the OLP history
 		if subfrNr == 0 && st.olGainFlg[0] > 0 {
 			st.oldLags[1] = r.T0
@@ -217,9 +265,10 @@ func (st *coderState) codAmr(mode int, newSpeech []int16) ([]int16, error) {
 
 		gainPit, gainCode, ng := st.gainQuant(mode, r, xn, xn2, y1, y2, code, res, st.oldExc[excBase:], prm[ap:])
 		ap += ng
+		st.ton.updateGpClipping(gainPit)
 
 		subframePostProc(st.oldSpeech[:], cSpeechOff, mode, iSubfr, gainPit, gainCode,
-			aqSub, synth, xn, code, y1, y2, st.memSyn[:], st.memErr[:], st.memW0[:],
+			aqSub, synth[:], xn, code, y1, y2, st.memSyn[:], st.memErr[:], st.memW0[:],
 			st.oldExc[:], cExcOff, &st.sharp)
 	}
 
@@ -228,7 +277,7 @@ func (st *coderState) codAmr(mode int, newSpeech []int16) ([]int16, error) {
 	copy(st.oldWsp[:cPIT_MAX], st.oldWsp[cL_FRAME:cL_FRAME+cPIT_MAX])
 	copy(st.oldSpeech[:cL_TOTAL-cL_FRAME], st.oldSpeech[cL_FRAME:cL_TOTAL])
 
-	return prm, nil
+	return prm, usedMode
 }
 
 // mr475Loop runs the four-subframe analysis-by-synthesis loop for MR475, whose
@@ -237,7 +286,7 @@ func (st *coderState) codAmr(mode int, newSpeech []int16) ([]int16, error) {
 // the following odd subframe the joint VQ chooses one index for the pair; both
 // subframes' final syntheses are then redone with the reconstructed gains.
 // Mirrors the MR475 branch of cod_amr.
-func (st *coderState) mr475Loop(az, azQ, Top, prm []int16, ap int, synth []int16) {
+func (st *coderState) mr475Loop(lspFlag int16, az, azQ, Top, prm []int16, ap int, synth []int16) {
 	const mode = dMR475
 	var memSynSave, memW0Save, memErrSave [cM]int16
 	var h1Sf0, xnSf0, y2Sf0, codeSf0 [cL_SUBFR]int16
@@ -274,7 +323,7 @@ func (st *coderState) mr475Loop(az, azQ, Top, prm []int16, ap int, synth []int16
 
 		xn2 := make([]int16, cL_SUBFR)
 		y1 := make([]int16, cL_SUBFR)
-		r := st.pit.clLtp(mode, iSubfr, Top, h1, st.oldExc[:], excBase, res2, xn, xn2, y1)
+		r := st.pit.clLtp(&st.ton, lspFlag, mode, iSubfr, Top, h1, st.oldExc[:], excBase, res2, xn, xn2, y1)
 		prm[ap] = r.pitchIndex
 		ap++
 
@@ -293,6 +342,7 @@ func (st *coderState) mr475Loop(az, azQ, Top, prm []int16, ap int, synth []int16
 			st.sf0FracCoeff, st.sf0ExpCoeff = fc, ec
 			st.sf0ExpTargetEn, st.sf0FracTargetEn = calcTargetEnergy(xn)
 			st.predUnq.mr475UpdateUnqPred(st.sf0ExpGcode0, st.sf0FracGcode0, cgExp, cgFrac)
+			st.ton.updateGpClipping(r.gainPit) // gainQuant leaves sf0's gain unquantized
 
 			// tentative synthesis with the unquantized optimum gains
 			gainCode := shl(cgFrac, cgExp+1)
@@ -316,6 +366,7 @@ func (st *coderState) mr475Loop(az, azQ, Top, prm []int16, ap int, synth []int16
 			ec[:], fc[:], tEnExp, tEnFrac, r.gpLimit)
 		prm[gainIdxPos] = idx
 		gainPitSf0, gainCodeSf0 = sf0gp, sf0gc
+		st.ton.updateGpClipping(sf1gp)
 
 		// redo the even subframe's final synthesis with the quantized gains
 		st.memErr = memErrSave
@@ -338,19 +389,19 @@ func (st *coderState) mr475Loop(az, azQ, Top, prm []int16, ap int, synth []int16
 
 // olPitch runs the open-loop pitch over the weighted-speech buffer for the
 // half-frame at frameOffset.
-func (st *coderState) olPitch(mode, frameOffset int) int16 {
+func (st *coderState) olPitch(vad *vadState, mode, frameOffset int) int16 {
 	idx := 0
 	if frameOffset != 0 {
 		idx = 1
 	}
 	if mode == dMR102 {
 		// weighted open-loop pitch with median/gain-flag adaptation
-		return st.pitWght.pitchOlWgh(st.oldWsp[:], cPIT_MAX+frameOffset, cPIT_MIN, cPIT_MAX,
+		return st.pitWght.pitchOlWgh(vad, st.oldWsp[:], cPIT_MAX+frameOffset, cPIT_MIN, cPIT_MAX,
 			cL_FRAME_BY2, st.oldLags[:], st.olGainFlg[:], idx)
 	}
 	pitMin := int16(cPIT_MIN)
 	if mode == dMR122 {
 		pitMin = cPIT_MIN_MR122
 	}
-	return pitchOl(mode, st.oldWsp[:], cPIT_MAX+frameOffset, int(pitMin), cPIT_MAX, cL_FRAME_BY2)
+	return pitchOl(vad, mode, st.oldWsp[:], cPIT_MAX+frameOffset, int(pitMin), cPIT_MAX, cL_FRAME_BY2, idx)
 }

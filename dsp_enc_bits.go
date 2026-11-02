@@ -48,3 +48,49 @@ func etsToIetf(mode Mode, ets []int16) []byte {
 func packFrame(prm []int16, mode Mode) []byte {
 	return etsToIetf(mode, prm2bits(mode, prm))
 }
+
+// packFrameInto is packFrame writing into dst (mode.Bytes() bytes) without
+// allocating.
+func packFrameInto(dst []byte, prm []int16, mode Mode) {
+	var ets [cMAX_SERIAL_SIZE]int16
+	pos := 0
+	for i, w := range bitno[mode] {
+		int2bin(prm[i], int(w), ets[pos:])
+		pos += int(w)
+	}
+	for i := range dst {
+		dst[i] = 0
+	}
+	ro := reorderBits[mode]
+	for k := 0; k < modeBits[mode]; k++ {
+		dst[k>>3] |= byte(ets[ro[k]]&1) << uint(7-(k&7))
+	}
+}
+
+// packSIDInto packs a SID frame into dst (5 bytes): the five comfort-noise
+// parameters MSB first, the STI bit (true: SID_UPDATE) and the mode
+// indication, LSB first. Mirrors AMREncode's SID fields and ets_to_ietf,
+// which does not reorder SID bits.
+func packSIDInto(dst []byte, prm []int16, sti bool, mode Mode) {
+	for i := range dst {
+		dst[i] = 0
+	}
+	pos := 0
+	put := func(b int16) {
+		dst[pos>>3] |= byte(b&1) << uint(7-(pos&7))
+		pos++
+	}
+	for i, w := range sidBitno {
+		for j := int(w) - 1; j >= 0; j-- {
+			put(prm[i] >> uint(j))
+		}
+	}
+	if sti {
+		put(1)
+	} else {
+		put(0)
+	}
+	for i := 0; i < 3; i++ {
+		put(int16(mode) >> uint(i))
+	}
+}
