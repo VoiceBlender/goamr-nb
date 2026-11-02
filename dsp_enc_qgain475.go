@@ -122,7 +122,7 @@ func (st *coderState) mr475GainQuant(sf1Code []int16, sf1ExpGcode0, sf1FracGcode
 	adj := int16(0)
 	if tmp := shr_r(sf1FracTargetEn, 1); tmp > sf0FracTargetEn {
 		adj = 1
-	} else if (sf0FracTargetEn+3)>>2 > sf1FracTargetEn {
+	} else if (int32(sf0FracTargetEn)+3)>>2 > int32(sf1FracTargetEn) { // C int arithmetic: no wrap
 		adj = -1
 	}
 	for i := 0; i < 5; i++ {

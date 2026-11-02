@@ -30,6 +30,7 @@ type postFilterState struct {
 
 func (st *postFilterState) reset() {
 	*st = postFilterState{}
+	st.agc.pastGain = 4096 // 1.0, as agc_reset sets it
 }
 
 // postFilter post-filters one 160-sample synthesis frame in place. az4 holds the

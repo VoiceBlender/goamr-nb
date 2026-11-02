@@ -18,9 +18,8 @@ const (
 // gmedN returns the median of the first n values of ind, matching the
 // index-based tie-breaking of the reference. Mirrors gmed_n.
 func gmedN(ind []int16, n int) int16 {
-	tmp2 := make([]int16, n)
-	copy(tmp2, ind[:n])
-	tmp := make([]int16, n)
+	var tmp2, tmp [9]int16 // n <= 9 (NMAX in gmed_n.cpp)
+	copy(tmp2[:n], ind[:n])
 	ix := 0
 	for i := 0; i < n; i++ {
 		max := int16(-32767)

@@ -64,7 +64,7 @@ func log2(L_x int32) (exponent, fraction int16) {
 // pow2 computes 2^(exponent + fraction) in Q0..Q31. Mirrors Pow2 (pow2.cpp).
 func pow2(exponent, fraction int16) int32 {
 	L_x := L_mult(fraction, 32) // fraction << 6
-	i := extract_h(L_x)
+	i := extract_h(L_x) & 31    // the mask keeps a negative fraction in the table
 	L_x = L_shr(L_x, 1)
 	a := extract_l(L_x) & 0x7fff
 	L_x = L_deposit_h(pow2_tbl[i])

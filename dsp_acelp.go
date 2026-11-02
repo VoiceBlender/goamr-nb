@@ -43,38 +43,28 @@ func predLt(exc []int16, pos int, T0, frac, Lsubfr, flag3 int16) {
 		k += cUP_SAMP_MAX
 	}
 
-	pExc := pos
-	for j := int(Lsubfr) >> 1; j != 0; j-- {
-		pX0++
-		ix2 := pX0
-		ix3 := pX0
-		pX0++
-
-		ic := 0
-		s1 := int32(0x4000)
-		s2 := int32(0x4000)
-		for i := cL_INTER10 >> 1; i > 0; i-- {
-			s2 += int32(exc[ix3]) * int32(coeff[ic])
-			ix3--
-			s1 += int32(exc[ix3]) * int32(coeff[ic])
-			ic++
-			s1 += int32(exc[ix2]) * int32(coeff[ic])
-			ix2++
-			s2 += int32(exc[ix2]) * int32(coeff[ic])
-			ic++
-			s2 += int32(exc[ix3]) * int32(coeff[ic])
-			ix3--
-			s1 += int32(exc[ix3]) * int32(coeff[ic])
-			ic++
-			s1 += int32(exc[ix2]) * int32(coeff[ic])
-			ix2++
-			s2 += int32(exc[ix2]) * int32(coeff[ic])
-			ic++
+	// Output n is 0x4000 + sum_k exc[c-k]*coeff[2k] + exc[c+1+k]*coeff[2k+1]
+	// (k = 0..9, c = pX0+n), shifted right by 15: a 20-tap FIR over
+	// exc[c-9 : c+11] with the window w. The int32 sums wrap, as in the
+	// reference, so their order does not matter. An output reads samples up to
+	// c+10, so for a short lag it depends on outputs of this call: compute the
+	// outputs in chunks that only read samples already final.
+	var w [2 * cL_INTER10]int16
+	for k := 0; k < cL_INTER10; k++ {
+		w[cL_INTER10-1-k] = coeff[2*k]
+		w[cL_INTER10+k] = coeff[2*k+1]
+	}
+	var acc [cL_SUBFR]int32
+	L := int(Lsubfr)
+	chunk := pos - (pX0 + cL_INTER10) // outputs that read only samples before pos
+	chunk = max(1, min(chunk, L))     // T0 >= 18 in every mode, so chunk >= 7
+	for n := 0; n < L; {
+		m := min(chunk, L-n)
+		firRaw(acc[:m], exc[pX0+n-(cL_INTER10-1):], w[:])
+		for i := 0; i < m; i++ {
+			exc[pos+n+i] = int16((acc[i] + 0x4000) >> 15)
 		}
-		exc[pExc] = int16(s1 >> 15)
-		pExc++
-		exc[pExc] = int16(s2 >> 15)
-		pExc++
+		n += m
 	}
 }
 

@@ -27,6 +27,10 @@ const (
 	numSpeechModes
 )
 
+// NoModeRequest is the codec mode request (CMR) value 15 of RFC 4867: the
+// sender of a payload asks for no particular mode.
+const NoModeRequest Mode = 15
+
 // Frame type (FT) values carried in the RFC 4867 ToC byte. Values 0..7 are the
 // speech modes; the remainder describe comfort noise and no-data frames. Note
 // that AMR-NB places SID at FT 8 (AMR-WB uses FT 9).
@@ -40,7 +44,7 @@ const (
 	FTMode1020   = 6
 	FTMode1220   = 7
 	FTSID        = 8  // comfort noise (SID)
-	FTSpeechLost = 14 // speech lost (RFC 4867)
+	FTSpeechLost = 14 // speech lost (3GPP TS 26.101)
 	FTNoData     = 15 // no data
 )
 

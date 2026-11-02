@@ -21,6 +21,7 @@ const (
 
 	cAMR_NB_PCM_FRAME = 160 // PCM samples produced/consumed per frame
 	cMAX_PRM_SIZE     = 57  // max number of serial parameters (MR122)
+	cMAX_SERIAL_SIZE  = 244 // max number of serial bits (MR122)
 )
 
 // Internal coding-mode enum, matching opencore-amrnb mode.h (enum Mode). These

@@ -42,7 +42,7 @@ func TestLspWrapper3(t *testing.T) {
 	copy(az[3*cMP1:], analysisA(1)) // A_new at the 4th subframe
 
 	anap := make([]int16, 5)
-	n := enc.lsp(dMR59, az, azQ, anap)
+	n := enc.lsp(dMR59, dMR59, az, azQ, anap, make([]int16, cM))
 	if n != 3 {
 		t.Fatalf("expected 3 indices, got %d", n)
 	}
@@ -74,7 +74,7 @@ func TestLspWrapper5(t *testing.T) {
 	copy(az[3*cMP1:], analysisA(3)) // A_new at the 4th subframe
 
 	anap := make([]int16, 5)
-	n := enc.lsp(dMR122, az, azQ, anap)
+	n := enc.lsp(dMR122, dMR122, az, azQ, anap, make([]int16, cM))
 	if n != 5 {
 		t.Fatalf("expected 5 indices, got %d", n)
 	}
